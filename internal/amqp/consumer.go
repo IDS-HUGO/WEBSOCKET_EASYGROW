@@ -1,3 +1,4 @@
+// internal/amqp/consumer.go - ACTUALIZADO
 package amqp
 
 import (
@@ -140,7 +141,7 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 
 			alertMsg := fmt.Sprintf("🚨 ALERTA: %s con valor crítico: %.2f", data.Nombre, data.Valor)
 
-			// Enviar alertas
+			// 1. Email (siempre funciona)
 			if email != "" {
 				go func() {
 					if err := alerts.SendEmailAlertTo(email, "⚠️ Alerta crítica en EasyGrow", alertMsg); err != nil {
@@ -151,6 +152,16 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 				}()
 			}
 
+			// 2. Telegram (GRATIS y MUY CONFIABLE)
+			go func() {
+				if err := alerts.SendTelegramAlert(alertMsg); err != nil {
+					log.Printf("❌ Error enviando Telegram: %v", err)
+				} else {
+					log.Printf("✅ Telegram enviado")
+				}
+			}()
+
+			// 3. WhatsApp (múltiples servicios gratuitos)
 			if phone != "" {
 				go func() {
 					if err := alerts.SendWhatsAppAlertTo(phone, alertMsg); err != nil {
@@ -160,6 +171,7 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 					}
 				}()
 
+				// 4. SMS (múltiples servicios gratuitos)
 				go func() {
 					if err := alerts.SendSMSAlertTo(phone, alertMsg); err != nil {
 						log.Printf("❌ Error enviando SMS: %v", err)
