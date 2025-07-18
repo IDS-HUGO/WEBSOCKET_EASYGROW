@@ -1,4 +1,4 @@
-// internal/amqp/consumer.go - ACTUALIZADO
+// internal/amqp/consumer.go - VERSIÓN SIMPLIFICADA
 package amqp
 
 import (
@@ -139,47 +139,73 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 
 			log.Printf("✅ Usuario encontrado - Email: %s, Teléfono: %s", email, phone)
 
-			alertMsg := fmt.Sprintf("🚨 ALERTA: %s con valor crítico: %.2f", data.Nombre, data.Valor)
+			alertMsg := fmt.Sprintf("🚨 ALERTA CRÍTICA\n📍 Dispositivo: %s\n📊 Sensor: %s\n⚠️ Valor: %.2f\n🕐 Revisa tu sistema EasyGrow inmediatamente",
+				data.MacAddress, data.Nombre, data.Valor)
 
-			// 1. Email (siempre funciona)
-			if email != "" {
-				go func() {
-					if err := alerts.SendEmailAlertTo(email, "⚠️ Alerta crítica en EasyGrow", alertMsg); err != nil {
+			// 1. TELEGRAM - Principal y más confiable
+			go func() {
+				if err := alerts.SendTelegramAlertToUser(phone, alertMsg); err != nil {
+					log.Printf("❌ Error enviando Telegram: %v", err)
+				} else {
+					log.Printf("✅ Alerta Telegram enviada para usuario: %s", phone)
+				}
+			}()
+
+			// 2. EMAIL - Respaldo confiable
+			go func() {
+				if email != "" {
+					emailSubject := "🚨 ALERTA CRÍTICA - EasyGrow"
+					emailBody := fmt.Sprintf(`
+Hola,
+
+Se ha detectado una alerta crítica en tu sistema EasyGrow:
+
+🔸 Dispositivo: %s
+🔸 Sensor: %s  
+🔸 Valor registrado: %.2f
+🔸 Hora: %s
+
+Por favor, revisa tu sistema inmediatamente.
+
+Saludos,
+Equipo EasyGrow
+					`, data.MacAddress, data.Nombre, data.Valor, "ahora")
+
+					if err := alerts.SendEmailAlertTo(email, emailSubject, emailBody); err != nil {
 						log.Printf("❌ Error enviando email: %v", err)
 					} else {
 						log.Printf("✅ Email enviado a: %s", email)
 					}
-				}()
-			}
-
-			// 2. Telegram (GRATIS y MUY CONFIABLE)
-			go func() {
-				if err := alerts.SendTelegramAlert(alertMsg); err != nil {
-					log.Printf("❌ Error enviando Telegram: %v", err)
-				} else {
-					log.Printf("✅ Telegram enviado")
 				}
 			}()
 
-			// 3. WhatsApp (múltiples servicios gratuitos)
-			if phone != "" {
-				go func() {
-					if err := alerts.SendWhatsAppAlertTo(phone, alertMsg); err != nil {
+			log.Printf("📤 Alertas enviadas para MAC: %s", data.MacAddress)
+
+			// 3. WHATSAPP
+			go func(phone, alertMsg string) {
+				if phone != "" {
+					if err := alerts.SendWhatsAppAlert(phone, alertMsg); err != nil {
 						log.Printf("❌ Error enviando WhatsApp: %v", err)
 					} else {
 						log.Printf("✅ WhatsApp enviado a: %s", phone)
 					}
-				}()
+				}
+			}(phone, alertMsg)
 
-				// 4. SMS (múltiples servicios gratuitos)
-				go func() {
-					if err := alerts.SendSMSAlertTo(phone, alertMsg); err != nil {
+			// 4. SMS
+			go func(phone, alertMsg string) {
+				if phone != "" {
+					phoneWithPlus := phone
+					if !strings.HasPrefix(phone, "+") {
+						phoneWithPlus = "+" + phone
+					}
+					if err := alerts.SendSMSAlert(phoneWithPlus, alertMsg); err != nil {
 						log.Printf("❌ Error enviando SMS: %v", err)
 					} else {
-						log.Printf("✅ SMS enviado a: %s", phone)
+						log.Printf("✅ SMS enviado a: %s", phoneWithPlus)
 					}
-				}()
-			}
+				}
+			}(phone, alertMsg)
 		}
 	}
 }

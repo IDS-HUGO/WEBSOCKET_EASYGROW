@@ -5,9 +5,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 )
 
-// Telegram Bot - GRATIS y MUY CONFIABLE
+// Enviar alerta por Telegram - GRATIS y MUY CONFIABLE
 func SendTelegramAlert(message string) error {
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
@@ -23,7 +24,8 @@ func SendTelegramAlert(message string) error {
 	data.Set("text", message)
 	data.Set("parse_mode", "HTML")
 
-	resp, err := http.PostForm(apiURL, data)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.PostForm(apiURL, data)
 	if err != nil {
 		return fmt.Errorf("❌ Error enviando Telegram: %w", err)
 	}
@@ -34,4 +36,11 @@ func SendTelegramAlert(message string) error {
 	}
 
 	return nil
+}
+
+// Enviar alerta personalizada a usuario específico por Telegram
+func SendTelegramAlertToUser(phone, message string) error {
+	// Por ahora usamos el mismo chat ID configurado
+	// En el futuro puedes mapear números de teléfono a chat IDs específicos
+	return SendTelegramAlert(fmt.Sprintf("📱 Alerta para %s:\n%s", phone, message))
 }
