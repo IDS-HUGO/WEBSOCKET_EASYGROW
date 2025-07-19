@@ -124,7 +124,6 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 			continue
 		}
 
-		// Debug: mostrar datos parseados
 		log.Printf("🔍 Datos parseados - MAC: %s, Sensor: %s, Valor: %.2f",
 			data.MacAddress, data.Nombre, data.Valor)
 
