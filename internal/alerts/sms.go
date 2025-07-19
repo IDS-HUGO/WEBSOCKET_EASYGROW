@@ -1,44 +1,86 @@
 package alerts
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
+	"time"
 )
+
+type VonageResponse struct {
+	Messages []struct {
+		Status           string `json:"status"`
+		MessageID        string `json:"message-id"`
+		ErrorText        string `json:"error-text"`
+		RemainingBalance string `json:"remaining-balance"`
+		MessagePrice     string `json:"message-price"`
+	} `json:"messages"`
+}
 
 func SendSMSAlert(to, message string) error {
 	apiKey := os.Getenv("VONAGE_API_KEY")
 	apiSecret := os.Getenv("VONAGE_API_SECRET")
-	from := os.Getenv("VONAGE_FROM_NUMBER") // tu número virtual comprado o nombre alfanumérico
+	from := os.Getenv("VONAGE_FROM_NUMBER")
 
+	if apiKey == "" || apiSecret == "" {
+		return fmt.Errorf("❌ Credenciales de Vonage no configuradas")
+	}
+
+	// API URL correcta para Vonage
 	apiURL := "https://rest.nexmo.com/sms/json"
 
-	form := url.Values{}
-	form.Set("api_key", apiKey)
-	form.Set("api_secret", apiSecret)
-	form.Set("to", to)
-	form.Set("from", from)
-	form.Set("text", message)
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
+	// Preparar el payload JSON
+	payload := map[string]string{
+		"api_key":    apiKey,
+		"api_secret": apiSecret,
+		"to":         to,
+		"from":       from,
+		"text":       message,
 	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("❌ Error creando JSON: %w", err)
+	}
+
+	// Crear request
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("❌ Error creando request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Cliente HTTP con timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("❌ Error enviando request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		fmt.Println("✅ SMS enviado a:", to)
+	// Leer respuesta
+	var vonageResp VonageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&vonageResp); err != nil {
+		return fmt.Errorf("❌ Error parseando respuesta: %w", err)
+	}
+
+	// Verificar respuesta
+	if len(vonageResp.Messages) == 0 {
+		return fmt.Errorf("❌ No se recibió respuesta de Vonage")
+	}
+
+	msg := vonageResp.Messages[0]
+	if msg.Status == "0" {
+		fmt.Printf("✅ SMS enviado exitosamente a: %s (ID: %s, Balance: %s)\n",
+			to, msg.MessageID, msg.RemainingBalance)
 		return nil
 	}
 
-	return fmt.Errorf("❌ Error al enviar SMS: status code %d", resp.StatusCode)
+	return fmt.Errorf("❌ Error Vonage: %s (Status: %s)", msg.ErrorText, msg.Status)
 }

@@ -1,4 +1,4 @@
-// internal/amqp/consumer.go - VERSIÓN SIMPLIFICADA
+// internal/amqp/consumer.go - VERSIÓN CORREGIDA
 package amqp
 
 import (
@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"WEBSOCKER_EASYGROW/internal/alerts"
 	"WEBSOCKER_EASYGROW/internal/db"
@@ -138,8 +139,14 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 
 			log.Printf("✅ Usuario encontrado - Email: %s, Teléfono: %s", email, phone)
 
-			alertMsg := fmt.Sprintf("🚨 ALERTA CRÍTICA\n📍 Dispositivo: %s\n📊 Sensor: %s\n⚠️ Valor: %.2f\n🕐 Revisa tu sistema EasyGrow inmediatamente",
-				data.MacAddress, data.Nombre, data.Valor)
+			alertMsg := fmt.Sprintf(`🚨 <b>ALERTA CRÍTICA</b>
+📍 <b>Dispositivo:</b> %s
+📊 <b>Sensor:</b> %s
+⚠️ <b>Valor:</b> %.2f
+🕐 <b>Fecha:</b> %s
+
+🔧 Revisa tu sistema EasyGrow inmediatamente`,
+				data.MacAddress, data.Nombre, data.Valor, time.Now().Format("2006-01-02 15:04:05"))
 
 			// 1. TELEGRAM - Principal y más confiable
 			go func() {
@@ -168,7 +175,7 @@ Por favor, revisa tu sistema inmediatamente.
 
 Saludos,
 Equipo EasyGrow
-					`, data.MacAddress, data.Nombre, data.Valor, "ahora")
+					`, data.MacAddress, data.Nombre, data.Valor, time.Now().Format("2006-01-02 15:04:05"))
 
 					if err := alerts.SendEmailAlertTo(email, emailSubject, emailBody); err != nil {
 						log.Printf("❌ Error enviando email: %v", err)
@@ -178,12 +185,29 @@ Equipo EasyGrow
 				}
 			}()
 
-			log.Printf("📤 Alertas enviadas para MAC: %s", data.MacAddress)
-
-			// 3. WHATSAPP
+			// 3. SMS - Versión corregida con formato correcto
 			go func(phone, alertMsg string) {
 				if phone != "" {
-					if err := alerts.SendWhatsAppAlert(phone, alertMsg); err != nil {
+					// Limpiar mensaje para SMS (sin HTML)
+					smsMsg := strings.ReplaceAll(alertMsg, "<b>", "")
+					smsMsg = strings.ReplaceAll(smsMsg, "</b>", "")
+
+					if err := alerts.SendSMSAlert(phone, smsMsg); err != nil {
+						log.Printf("❌ Error enviando SMS: %v", err)
+					} else {
+						log.Printf("✅ SMS enviado a: %s", phone)
+					}
+				}
+			}(phone, alertMsg)
+
+			// 4. WHATSAPP - Versión corregida
+			go func(phone, alertMsg string) {
+				if phone != "" {
+					// Limpiar mensaje para WhatsApp (sin HTML)
+					waMsg := strings.ReplaceAll(alertMsg, "<b>", "*")
+					waMsg = strings.ReplaceAll(waMsg, "</b>", "*")
+
+					if err := alerts.SendWhatsAppAlert(phone, waMsg); err != nil {
 						log.Printf("❌ Error enviando WhatsApp: %v", err)
 					} else {
 						log.Printf("✅ WhatsApp enviado a: %s", phone)
@@ -191,20 +215,7 @@ Equipo EasyGrow
 				}
 			}(phone, alertMsg)
 
-			// 4. SMS
-			go func(phone, alertMsg string) {
-				if phone != "" {
-					phoneWithPlus := phone
-					if !strings.HasPrefix(phone, "+") {
-						phoneWithPlus = "+" + phone
-					}
-					if err := alerts.SendSMSAlert(phoneWithPlus, alertMsg); err != nil {
-						log.Printf("❌ Error enviando SMS: %v", err)
-					} else {
-						log.Printf("✅ SMS enviado a: %s", phoneWithPlus)
-					}
-				}
-			}(phone, alertMsg)
+			log.Printf("📤 Todas las alertas han sido programadas para MAC: %s", data.MacAddress)
 		}
 	}
 }
