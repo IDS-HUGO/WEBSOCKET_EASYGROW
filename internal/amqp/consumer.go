@@ -1,4 +1,4 @@
-// internal/amqp/consumer.go - VERSIÓN CORREGIDA
+// internal/amqp/consumer.go - VERSIÓN CON LOGS COMPLETOS
 package amqp
 
 import (
@@ -115,29 +115,59 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 	}
 	defer dbConn.Close()
 
-	for msg := range msgs {
-		log.Printf("📥 Mensaje recibido: %s", msg.Body)
-		hub.Broadcast(msg.Body)
+	log.Println("🔄 Esperando mensajes de la cola...")
+	log.Println("=" + strings.Repeat("=", 60))
 
+	for msg := range msgs {
+		// MOSTRAR TODO LO QUE LLEGA - INFORMACIÓN COMPLETA
+		log.Println("📥 MENSAJE RECIBIDO:")
+		log.Printf("   📋 Raw Data: %s", string(msg.Body))
+		log.Printf("   🕐 Timestamp: %s", time.Now().Format("2006-01-02 15:04:05"))
+		log.Printf("   📏 Tamaño: %d bytes", len(msg.Body))
+
+		// Intentar parsear el JSON
 		var data SensorData
 		if err := json.Unmarshal(msg.Body, &data); err != nil {
-			log.Printf("❌ Error al parsear JSON: %v", err)
+			log.Printf("   ❌ Error al parsear JSON: %v", err)
+			log.Println("   📤 Reenviando a WebSocket sin procesar...")
+			hub.Broadcast(msg.Body)
+			log.Println("   " + strings.Repeat("-", 58))
 			continue
 		}
 
-		log.Printf("🔍 Datos parseados - MAC: %s, Sensor: %s, Valor: %.2f",
-			data.MacAddress, data.Nombre, data.Valor)
+		// MOSTRAR DATOS PARSEADOS CON DETALLE
+		log.Println("   ✅ JSON parseado exitosamente:")
+		log.Printf("   🔧 MAC Address: %s", data.MacAddress)
+		log.Printf("   📊 Sensor: %s", data.Nombre)
+		log.Printf("   📈 Valor: %.2f", data.Valor)
 
-		if isCritical(data.Nombre, data.Valor) {
-			log.Printf("🚨 Valor crítico detectado para MAC: %s", data.MacAddress)
+		// Verificar si es crítico
+		critical := isCritical(data.Nombre, data.Valor)
+		if critical {
+			log.Printf("   🚨 ESTADO: CRÍTICO ⚠️")
+		} else {
+			log.Printf("   ✅ ESTADO: Normal")
+		}
+
+		// Siempre enviar a WebSocket
+		log.Printf("JSON AL FRONT: %s", string(msg.Body))
+		log.Println("   📤 Enviando a WebSocket...")
+		hub.Broadcast(msg.Body)
+
+		// Si es crítico, procesar alertas
+		if critical {
+			log.Println("   🔍 Procesando alerta crítica...")
 
 			email, phone, err := getUserByMac(dbConn, data.MacAddress)
 			if err != nil {
-				log.Printf("❌ Error obteniendo usuario para MAC %s: %v", data.MacAddress, err)
+				log.Printf("   ❌ Error obteniendo usuario para MAC %s: %v", data.MacAddress, err)
+				log.Println("   " + strings.Repeat("-", 58))
 				continue
 			}
 
-			log.Printf("✅ Usuario encontrado - Email: %s, Teléfono: %s", email, phone)
+			log.Printf("   👤 Usuario encontrado:")
+			log.Printf("      📧 Email: %s", email)
+			log.Printf("      📱 Teléfono: %s", phone)
 
 			alertMsg := fmt.Sprintf(`🚨 <b>ALERTA CRÍTICA</b>
 📍 <b>Dispositivo:</b> %s
@@ -148,18 +178,22 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 🔧 Revisa tu sistema EasyGrow inmediatamente`,
 				data.MacAddress, data.Nombre, data.Valor, time.Now().Format("2006-01-02 15:04:05"))
 
+			log.Println("   📬 Enviando alertas...")
+
 			// 1. TELEGRAM - Principal y más confiable
 			go func() {
+				log.Printf("   📱 Enviando Telegram a: %s", phone)
 				if err := alerts.SendTelegramAlertToUser(phone, alertMsg); err != nil {
-					log.Printf("❌ Error enviando Telegram: %v", err)
+					log.Printf("   ❌ Error Telegram: %v", err)
 				} else {
-					log.Printf("✅ Alerta Telegram enviada para usuario: %s", phone)
+					log.Printf("   ✅ Telegram enviado exitosamente")
 				}
 			}()
 
 			// 2. EMAIL - Respaldo confiable
 			go func() {
 				if email != "" {
+					log.Printf("   📧 Enviando Email a: %s", email)
 					emailSubject := "🚨 ALERTA CRÍTICA - EasyGrow"
 					emailBody := fmt.Sprintf(`
 Hola,
@@ -178,44 +212,57 @@ Equipo EasyGrow
 					`, data.MacAddress, data.Nombre, data.Valor, time.Now().Format("2006-01-02 15:04:05"))
 
 					if err := alerts.SendEmailAlertTo(email, emailSubject, emailBody); err != nil {
-						log.Printf("❌ Error enviando email: %v", err)
+						log.Printf("   ❌ Error Email: %v", err)
 					} else {
-						log.Printf("✅ Email enviado a: %s", email)
+						log.Printf("   ✅ Email enviado exitosamente")
 					}
+				} else {
+					log.Printf("   ⚠️ Email omitido (no configurado)")
 				}
 			}()
 
 			// 3. SMS - Versión corregida con formato correcto
 			go func(phone, alertMsg string) {
 				if phone != "" {
+					log.Printf("   📞 Enviando SMS a: %s", phone)
 					// Limpiar mensaje para SMS (sin HTML)
 					smsMsg := strings.ReplaceAll(alertMsg, "<b>", "")
 					smsMsg = strings.ReplaceAll(smsMsg, "</b>", "")
 
 					if err := alerts.SendSMSAlert(phone, smsMsg); err != nil {
-						log.Printf("❌ Error enviando SMS: %v", err)
+						log.Printf("   ❌ Error SMS: %v", err)
 					} else {
-						log.Printf("✅ SMS enviado a: %s", phone)
+						log.Printf("   ✅ SMS enviado exitosamente")
 					}
+				} else {
+					log.Printf("   ⚠️ SMS omitido (teléfono no configurado)")
 				}
 			}(phone, alertMsg)
 
 			// 4. WHATSAPP - Versión corregida
 			go func(phone, alertMsg string) {
 				if phone != "" {
+					log.Printf("   💬 Enviando WhatsApp a: %s", phone)
 					// Limpiar mensaje para WhatsApp (sin HTML)
 					waMsg := strings.ReplaceAll(alertMsg, "<b>", "*")
 					waMsg = strings.ReplaceAll(waMsg, "</b>", "*")
 
 					if err := alerts.SendWhatsAppAlert(phone, waMsg); err != nil {
-						log.Printf("❌ Error enviando WhatsApp: %v", err)
+						log.Printf("   ❌ Error WhatsApp: %v", err)
 					} else {
-						log.Printf("✅ WhatsApp enviado a: %s", phone)
+						log.Printf("   ✅ WhatsApp enviado exitosamente")
 					}
+				} else {
+					log.Printf("   ⚠️ WhatsApp omitido (teléfono no configurado)")
 				}
 			}(phone, alertMsg)
 
-			log.Printf("📤 Todas las alertas han sido programadas para MAC: %s", data.MacAddress)
+			log.Printf("   📤 Todas las alertas programadas para MAC: %s", data.MacAddress)
+		} else {
+			log.Println("   ℹ️ No se requiere alerta (valor normal)")
 		}
+
+		// Separador visual entre mensajes
+		log.Println("   " + strings.Repeat("-", 58))
 	}
 }
