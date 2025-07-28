@@ -23,4 +23,5 @@ func main() {
 
 	log.Println("🚀 Servidor WebSocket corriendo en :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
