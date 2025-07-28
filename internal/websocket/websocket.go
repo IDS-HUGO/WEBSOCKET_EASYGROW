@@ -65,4 +65,16 @@ func HandleConnections(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		hub.unregister <- ws
 	}()
+
+	for {
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			log.Printf("🔌 Conexión cerrada: %v", err)
+			break
+		}
+		log.Printf("📨 Mensaje recibido: %s", msg)
+
+		// reenviar el mensaje a todos los clientes conectados
+		hub.Broadcast(msg)
+	}
 }
