@@ -21,15 +21,17 @@ type SensorData struct {
 	MacAddress string  `json:"mac_address"`
 	Valor      float64 `json:"valor"`
 	Nombre     string  `json:"nombre"`
+	Fecha      string  `json:"fecha"`
 }
 
 type BombaEvent struct {
-	MacAddress      string  `json:"mac_address"`
-	Evento          string  `json:"evento"`
-	Bomba           string  `json:"bomba"`
-	IDSensor        int     `json:"id_sensor,omitempty"`
-	ValorHumedad    float64 `json:"valor_humedad,omitempty"`
-	TiempoEncendida int     `json:"tiempo_encendida_seg,omitempty"`
+	MacAddress         string  `json:"mac_address"`
+	Evento             string  `json:"evento"`
+	Bomba              string  `json:"bomba,omitempty"`
+	IDSensor           int     `json:"id_sensor,omitempty"`
+	ValorHumedad       float64 `json:"valor_humedad,omitempty"`
+	TiempoEncendidaSeg *int    `json:"tiempo_encendida_seg"`
+	Fecha              string  `json:"fecha"`
 }
 
 // Funciones para insertar en BD
@@ -90,13 +92,37 @@ func insertBombaEvent(dbConn *sql.DB, event BombaEvent) error {
 		VALUES (?, ?, ?, ?, ?, ?)
 	`
 
+	var bomba sql.NullString
+	if event.Bomba != "" {
+		bomba.String = event.Bomba
+		bomba.Valid = true
+	}
+
+	var idSensor sql.NullInt64
+	if event.IDSensor != 0 {
+		idSensor.Int64 = int64(event.IDSensor)
+		idSensor.Valid = true
+	}
+
+	var valorHumedad sql.NullFloat64
+	if event.ValorHumedad != 0 {
+		valorHumedad.Float64 = event.ValorHumedad
+		valorHumedad.Valid = true
+	}
+
+	var tiempoEncendida sql.NullInt64
+	if event.TiempoEncendidaSeg != nil {
+		tiempoEncendida.Int64 = int64(*event.TiempoEncendidaSeg)
+		tiempoEncendida.Valid = true
+	}
+
 	_, err := dbConn.Exec(insertQuery,
 		event.MacAddress,
 		event.Evento,
-		event.Bomba,
-		nullInt(event.IDSensor),
-		nullFloat(event.ValorHumedad),
-		nullInt(event.TiempoEncendida))
+		bomba,
+		idSensor,
+		valorHumedad,
+		tiempoEncendida)
 
 	if err != nil {
 		log.Printf("❌ Error insertando evento bomba: %v", err)
@@ -132,8 +158,12 @@ func createAlert(dbConn *sql.DB, macAddress string, sensorName string, valor flo
 		tipoAlerta = "humedad"
 	case "sensor de luminosidad":
 		tipoAlerta = "luz"
-	case "sensor ultrasónico":
+	case "sensor ultrasonico":
 		tipoAlerta = "riego"
+	case "sensor de lluvia yl-83":
+		tipoAlerta = "clima"
+	case "sensor de vibración sw-420":
+		tipoAlerta = "seguridad"
 	}
 
 	mensaje := fmt.Sprintf("Valor crítico detectado: %.2f en %s (Dispositivo: %s)",
@@ -152,21 +182,7 @@ func createAlert(dbConn *sql.DB, macAddress string, sensorName string, valor flo
 	}
 }
 
-// Funciones auxiliares
-func nullInt(value int) interface{} {
-	if value == 0 {
-		return nil
-	}
-	return value
-}
-
-func nullFloat(value float64) interface{} {
-	if value == 0 {
-		return nil
-	}
-	return value
-}
-
+// Funciones auxiliares para detectar valores críticos
 func isCritical(sensor string, value float64) bool {
 	switch strings.ToLower(sensor) {
 	case "sensor de temperatura":
@@ -175,7 +191,7 @@ func isCritical(sensor string, value float64) bool {
 		return value < 30.0 || value > 90.0
 	case "sensor de luminosidad":
 		return value < 50.0
-	case "sensor ultrasónico":
+	case "sensor ultrasonico":
 		return value < 5.0
 	case "sensor de lluvia yl-83":
 		return value == 0 // Está lloviendo
@@ -193,7 +209,7 @@ func isWarning(sensor string, value float64) bool {
 		return (value < 40.0 && value >= 30.0) || (value > 80.0 && value <= 90.0)
 	case "sensor de luminosidad":
 		return value < 100.0 && value >= 50.0
-	case "sensor ultrasónico":
+	case "sensor ultrasonico":
 		return value < 10.0 && value >= 5.0
 	}
 	return false
@@ -218,10 +234,158 @@ func getUserByMac(db *sql.DB, mac string) (email, phone string, err error) {
 	return email, phone, nil
 }
 
-// Función principal del consumer
-func ConsumeFromQueue(hub *websocket.Hub) {
+// Consumer para la cola de datos de sensores
+func consumeSensorData(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub *websocket.Hub) {
+	msgs, err := ch.Consume(queueName, "", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("❌ Error al consumir cola %s: %v", queueName, err)
+	}
+
+	log.Printf("🔄 Consumiendo mensajes de cola: %s", queueName)
+
+	for msg := range msgs {
+		log.Println("📥 SENSOR DATA RECIBIDO:")
+		log.Printf("   📋 Raw Data: %s", string(msg.Body))
+		log.Printf("   🕐 Timestamp: %s", time.Now().Format("2006-01-02 15:04:05"))
+
+		// Enviar a WebSocket
+		hub.Broadcast(msg.Body)
+		log.Println("   📤 Enviado a WebSocket")
+
+		// Procesar datos del sensor
+		var sensorData SensorData
+		if err := json.Unmarshal(msg.Body, &sensorData); err != nil {
+			log.Printf("   ❌ Error parseando sensor data: %v", err)
+			continue
+		}
+
+		log.Printf("   📊 SENSOR DATA: %s = %.2f", sensorData.Nombre, sensorData.Valor)
+		log.Printf("      MAC: %s", sensorData.MacAddress)
+
+		// Insertar en BD
+		if err := insertSensorReading(dbConn, sensorData); err != nil {
+			log.Printf("   ❌ Error insertando sensor data: %v", err)
+		}
+
+		// Verificar si es crítico y crear alerta
+		if isCritical(sensorData.Nombre, sensorData.Valor) {
+			log.Printf("   🚨 VALOR CRÍTICO DETECTADO")
+
+			// Crear alerta en BD
+			createAlert(dbConn, sensorData.MacAddress, sensorData.Nombre, sensorData.Valor)
+
+			// Obtener usuario y enviar notificaciones
+			email, phone, err := getUserByMac(dbConn, sensorData.MacAddress)
+			if err != nil {
+				log.Printf("   ❌ Error obteniendo usuario: %v", err)
+			} else {
+				log.Printf("   👤 Usuario: %s, Tel: %s", email, phone)
+
+				alertMsg := fmt.Sprintf(`🚨 <b>ALERTA CRÍTICA - SENSOR</b>
+📍 <b>Dispositivo:</b> %s
+📊 <b>Sensor:</b> %s
+⚠️ <b>Valor:</b> %.2f
+🕐 <b>Fecha:</b> %s
+
+🔧 Revisa tu sistema EasyGrow inmediatamente`,
+					sensorData.MacAddress, sensorData.Nombre, sensorData.Valor,
+					time.Now().Format("2006-01-02 15:04:05"))
+
+				// Enviar alertas
+				go sendAllAlerts(email, phone, alertMsg)
+			}
+		}
+
+		log.Println("   " + strings.Repeat("-", 58))
+	}
+}
+
+// Consumer para la cola de eventos de bomba
+func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub *websocket.Hub) {
+	msgs, err := ch.Consume(queueName, "", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("❌ Error al consumir cola %s: %v", queueName, err)
+	}
+
+	log.Printf("🔄 Consumiendo mensajes de cola: %s", queueName)
+
+	for msg := range msgs {
+		log.Println("📥 BOMBA EVENT RECIBIDO:")
+		log.Printf("   📋 Raw Data: %s", string(msg.Body))
+		log.Printf("   🕐 Timestamp: %s", time.Now().Format("2006-01-02 15:04:05"))
+
+		// Enviar a WebSocket
+		hub.Broadcast(msg.Body)
+		log.Println("   📤 Enviado a WebSocket")
+
+		// Procesar evento de bomba
+		var bombaEvent BombaEvent
+		if err := json.Unmarshal(msg.Body, &bombaEvent); err != nil {
+			log.Printf("   ❌ Error parseando evento bomba: %v", err)
+			continue
+		}
+
+		log.Printf("   🚰 EVENTO BOMBA: %s", bombaEvent.Evento)
+		log.Printf("      MAC: %s, Bomba: %s", bombaEvent.MacAddress, bombaEvent.Bomba)
+		if bombaEvent.ValorHumedad != 0 {
+			log.Printf("      Humedad: %.0f", bombaEvent.ValorHumedad)
+		}
+		if bombaEvent.TiempoEncendidaSeg != nil {
+			log.Printf("      Tiempo encendida: %d seg", *bombaEvent.TiempoEncendidaSeg)
+		}
+
+		// Insertar en BD
+		if err := insertBombaEvent(dbConn, bombaEvent); err != nil {
+			log.Printf("   ❌ Error insertando evento bomba: %v", err)
+		}
+
+		// Crear alerta informativa para eventos de bomba
+		if strings.Contains(bombaEvent.Evento, "activada") {
+			log.Printf("   💧 BOMBA ACTIVADA - Creando alerta informativa")
+
+			// Obtener usuario y enviar notificación
+			email, phone, err := getUserByMac(dbConn, bombaEvent.MacAddress)
+			if err != nil {
+				log.Printf("   ❌ Error obteniendo usuario: %v", err)
+			} else {
+				log.Printf("   👤 Usuario: %s, Tel: %s", email, phone)
+
+				alertMsg := fmt.Sprintf(`💧 <b>BOMBA ACTIVADA</b>
+📍 <b>Dispositivo:</b> %s
+🚰 <b>Bomba:</b> %s
+📊 <b>Humedad detectada:</b> %.0f
+🕐 <b>Fecha:</b> %s
+
+💡 Tu sistema de riego está funcionando correctamente`,
+					bombaEvent.MacAddress, bombaEvent.Bomba, bombaEvent.ValorHumedad,
+					time.Now().Format("2006-01-02 15:04:05"))
+
+				// Enviar solo notificación por Telegram (menos invasivo)
+				go func() {
+					if err := alerts.SendTelegramAlertToUser(phone, alertMsg); err != nil {
+						log.Printf("❌ Error Telegram: %v", err)
+					}
+				}()
+			}
+		}
+
+		log.Println("   " + strings.Repeat("-", 58))
+	}
+}
+
+// Función principal del consumer - ahora maneja dos colas
+func ConsumeFromQueues(hub *websocket.Hub) {
 	amqpURL := os.Getenv("AMQP_URL")
-	queue := os.Getenv("QUEUE_NAME")
+	sensorQueue := os.Getenv("SENSOR_QUEUE_NAME") // datos_sensores
+	bombaQueue := os.Getenv("BOMBA_QUEUE_NAME")   // eventos_bomba
+
+	// Verificar que las variables estén configuradas
+	if sensorQueue == "" {
+		sensorQueue = "datos_sensores" // valor por defecto
+	}
+	if bombaQueue == "" {
+		bombaQueue = "eventos_bomba" // valor por defecto
+	}
 
 	conn, err := amqp.Dial(amqpURL)
 	if err != nil {
@@ -230,113 +394,46 @@ func ConsumeFromQueue(hub *websocket.Hub) {
 	defer conn.Close()
 	log.Println("✅ Conexión a RabbitMQ OK")
 
-	ch, err := conn.Channel()
+	// Crear canales separados para cada cola
+	chSensor, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("❌ Error abriendo canal: %v", err)
+		log.Fatalf("❌ Error abriendo canal para sensores: %v", err)
 	}
-	defer ch.Close()
+	defer chSensor.Close()
 
-	msgs, err := ch.Consume(queue, "", true, false, false, false, nil)
+	chBomba, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("❌ Error al consumir cola: %v", err)
+		log.Fatalf("❌ Error abriendo canal para bombas: %v", err)
 	}
+	defer chBomba.Close()
 
+	// Conectar a la base de datos
 	dbConn, err := db.ConnectDB()
 	if err != nil {
 		log.Fatalf("❌ BD error: %v", err)
 	}
 	defer dbConn.Close()
 
-	log.Println("🔄 Esperando mensajes de la cola...")
+	log.Println("🔄 Iniciando consumidores para ambas colas...")
+	log.Printf("   📊 Cola sensores: %s", sensorQueue)
+	log.Printf("   🚰 Cola bombas: %s", bombaQueue)
 	log.Println("=" + strings.Repeat("=", 60))
 
-	for msg := range msgs {
-		log.Println("📥 MENSAJE RECIBIDO:")
-		log.Printf("   📋 Raw Data: %s", string(msg.Body))
-		log.Printf("   🕐 Timestamp: %s", time.Now().Format("2006-01-02 15:04:05"))
+	// Lanzar goroutines para consumir de ambas colas simultáneamente
+	go consumeSensorData(chSensor, sensorQueue, dbConn, hub)
+	go consumeBombaEvents(chBomba, bombaQueue, dbConn, hub)
 
-		// Siempre enviar a WebSocket primero
-		hub.Broadcast(msg.Body)
-		log.Println("   📤 Enviado a WebSocket")
+	// Mantener el programa corriendo
+	select {}
+}
 
-		// Procesar según el tipo de JSON
-		var rawMessage map[string]interface{}
-		if err := json.Unmarshal(msg.Body, &rawMessage); err != nil {
-			log.Printf("   ❌ Error parseando JSON: %v", err)
-			continue
-		}
-
-		// Detectar tipo de mensaje
-		if _, hasEvento := rawMessage["evento"]; hasEvento {
-			// Es un evento de bomba
-			var bombaEvent BombaEvent
-			if err := json.Unmarshal(msg.Body, &bombaEvent); err != nil {
-				log.Printf("   ❌ Error parseando evento bomba: %v", err)
-				continue
-			}
-
-			log.Printf("   🚰 EVENTO BOMBA: %s", bombaEvent.Evento)
-			log.Printf("      MAC: %s, Bomba: %s", bombaEvent.MacAddress, bombaEvent.Bomba)
-
-			// Insertar en BD
-			if err := insertBombaEvent(dbConn, bombaEvent); err != nil {
-				log.Printf("   ❌ Error insertando evento bomba: %v", err)
-			}
-
-		} else if hasValor := rawMessage["valor"]; hasValor != nil {
-			// Es un dato de sensor
-			var sensorData SensorData
-			if err := json.Unmarshal(msg.Body, &sensorData); err != nil {
-				log.Printf("   ❌ Error parseando sensor data: %v", err)
-				continue
-			}
-
-			log.Printf("   📊 SENSOR DATA: %s = %.2f", sensorData.Nombre, sensorData.Valor)
-			log.Printf("      MAC: %s", sensorData.MacAddress)
-
-			// Insertar en BD
-			if err := insertSensorReading(dbConn, sensorData); err != nil {
-				log.Printf("   ❌ Error insertando sensor data: %v", err)
-			}
-
-			// Verificar si es crítico y crear alerta
-			if isCritical(sensorData.Nombre, sensorData.Valor) {
-				log.Printf("   🚨 VALOR CRÍTICO DETECTADO")
-
-				// Crear alerta en BD
-				createAlert(dbConn, sensorData.MacAddress, sensorData.Nombre, sensorData.Valor)
-
-				// Obtener usuario y enviar notificaciones
-				email, phone, err := getUserByMac(dbConn, sensorData.MacAddress)
-				if err != nil {
-					log.Printf("   ❌ Error obteniendo usuario: %v", err)
-				} else {
-					log.Printf("   👤 Usuario: %s, Tel: %s", email, phone)
-
-					alertMsg := fmt.Sprintf(`🚨 <b>ALERTA CRÍTICA</b>
-📍 <b>Dispositivo:</b> %s
-📊 <b>Sensor:</b> %s
-⚠️ <b>Valor:</b> %.2f
-🕐 <b>Fecha:</b> %s
-
-🔧 Revisa tu sistema EasyGrow inmediatamente`,
-						sensorData.MacAddress, sensorData.Nombre, sensorData.Valor,
-						time.Now().Format("2006-01-02 15:04:05"))
-
-					// Enviar alertas (Telegram, Email, SMS, WhatsApp)
-					go sendAllAlerts(email, phone, alertMsg)
-				}
-			}
-		} else {
-			log.Printf("   ⚠️ Tipo de mensaje no reconocido")
-		}
-
-		log.Println("   " + strings.Repeat("-", 58))
-	}
+// Función de compatibilidad - mantener para no romper el main.go existente
+func ConsumeFromQueue(hub *websocket.Hub) {
+	ConsumeFromQueues(hub)
 }
 
 func sendAllAlerts(email, phone, message string) {
-	// Telegram
+	// Telegram (más confiable y gratuito)
 	if err := alerts.SendTelegramAlertToUser(phone, message); err != nil {
 		log.Printf("❌ Error Telegram: %v", err)
 	}
@@ -352,7 +449,7 @@ func sendAllAlerts(email, phone, message string) {
 		}
 	}
 
-	// SMS
+	// SMS (solo para alertas críticas)
 	if phone != "" {
 		smsMsg := strings.ReplaceAll(message, "<b>", "")
 		smsMsg = strings.ReplaceAll(smsMsg, "</b>", "")
