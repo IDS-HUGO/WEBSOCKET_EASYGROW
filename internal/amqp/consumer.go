@@ -34,7 +34,7 @@ type BombaEvent struct {
 	Fecha              string  `json:"fecha"`
 }
 
-// Funciones para insertar en BD
+// Función para insertar lecturas de sensores (mejorada)
 func insertSensorReading(dbConn *sql.DB, data SensorData) error {
 	// 1. Obtener el ID del sensor basado en MAC y nombre
 	var sensorID int
@@ -82,24 +82,57 @@ func insertSensorReading(dbConn *sql.DB, data SensorData) error {
 		return err
 	}
 
-	log.Printf("✅ Lectura insertada: Sensor %d, Valor %.2f, Calidad %s", sensorID, data.Valor, calidad)
+	log.Printf("✅ Lectura insertada: Sensor %d (%s), Valor %.2f, Calidad %s",
+		sensorID, data.Nombre, data.Valor, calidad)
 	return nil
 }
 
+// Función para insertar evento de bomba (corregida)
 func insertBombaEvent(dbConn *sql.DB, event BombaEvent) error {
+	// 1. Verificar si el sensor existe antes de insertar
+	var sensorExists bool
+	if event.IDSensor != 0 {
+		checkSensorQuery := `SELECT EXISTS(SELECT 1 FROM sensor_datos WHERE id_sensor = ? AND activo = 1)`
+		err := dbConn.QueryRow(checkSensorQuery, event.IDSensor).Scan(&sensorExists)
+		if err != nil {
+			log.Printf("❌ Error verificando sensor ID %d: %v", event.IDSensor, err)
+			return err
+		}
+
+		if !sensorExists {
+			log.Printf("⚠️ ADVERTENCIA: Sensor ID %d no existe o está inactivo. Insertando evento sin referencia al sensor", event.IDSensor)
+			// Insertar sin id_sensor para evitar el error de foreign key
+			event.IDSensor = 0
+		} else {
+			log.Printf("✅ Sensor ID %d verificado correctamente", event.IDSensor)
+		}
+	}
+
+	// 2. Extraer información de bomba del evento si no viene en el campo bomba
+	bombaDetectada := event.Bomba
+	if bombaDetectada == "" {
+		eventoLower := strings.ToLower(event.Evento)
+		if strings.Contains(eventoLower, "bomba a") {
+			bombaDetectada = "A"
+		} else if strings.Contains(eventoLower, "bomba b") {
+			bombaDetectada = "B"
+		}
+	}
+
+	// 3. Insertar el evento
 	insertQuery := `
 		INSERT INTO eventos_bomba (mac_address, evento, bomba, id_sensor, valor_humedad, tiempo_encendida_seg) 
 		VALUES (?, ?, ?, ?, ?, ?)
 	`
 
 	var bomba sql.NullString
-	if event.Bomba != "" {
-		bomba.String = event.Bomba
+	if bombaDetectada != "" {
+		bomba.String = bombaDetectada
 		bomba.Valid = true
 	}
 
 	var idSensor sql.NullInt64
-	if event.IDSensor != 0 {
+	if event.IDSensor != 0 && sensorExists {
 		idSensor.Int64 = int64(event.IDSensor)
 		idSensor.Valid = true
 	}
@@ -129,8 +162,8 @@ func insertBombaEvent(dbConn *sql.DB, event BombaEvent) error {
 		return err
 	}
 
-	log.Printf("✅ Evento bomba insertado: MAC %s, Bomba %s, Evento: %s",
-		event.MacAddress, event.Bomba, event.Evento)
+	log.Printf("✅ Evento bomba insertado: MAC %s, Bomba %s, Sensor ID %d, Evento: %s",
+		event.MacAddress, bombaDetectada, event.IDSensor, event.Evento)
 	return nil
 }
 
@@ -153,17 +186,20 @@ func createAlert(dbConn *sql.DB, macAddress string, sensorName string, valor flo
 
 	// Determinar tipo de alerta
 	tipoAlerta := "temperatura"
-	switch strings.ToLower(sensorName) {
-	case "sensor de humedad":
+	sensorLower := strings.ToLower(sensorName)
+	switch {
+	case strings.Contains(sensorLower, "humedad") && !strings.Contains(sensorLower, "suelo") && !strings.Contains(sensorLower, "yl-69"):
 		tipoAlerta = "humedad"
-	case "sensor de luminosidad":
+	case strings.Contains(sensorLower, "luminosidad"):
 		tipoAlerta = "luz"
-	case "sensor ultrasonico":
+	case strings.Contains(sensorLower, "ultrasonico"):
 		tipoAlerta = "riego"
-	case "sensor de lluvia yl-83":
-		tipoAlerta = "clima"
-	case "sensor de vibración sw-420":
-		tipoAlerta = "seguridad"
+	case strings.Contains(sensorLower, "lluvia") || strings.Contains(sensorLower, "yl-83"):
+		tipoAlerta = "riego"
+	case strings.Contains(sensorLower, "vibracion") || strings.Contains(sensorLower, "sw-420"):
+		tipoAlerta = "riego" // Clasificamos vibración como riego por ahora
+	case strings.Contains(sensorLower, "yl-69") || (strings.Contains(sensorLower, "humedad") && strings.Contains(sensorLower, "suelo")):
+		tipoAlerta = "riego"
 	}
 
 	mensaje := fmt.Sprintf("Valor crítico detectado: %.2f en %s (Dispositivo: %s)",
@@ -182,35 +218,43 @@ func createAlert(dbConn *sql.DB, macAddress string, sensorName string, valor flo
 	}
 }
 
-// Funciones auxiliares para detectar valores críticos
+// Funciones auxiliares para detectar valores críticos (actualizadas)
 func isCritical(sensor string, value float64) bool {
-	switch strings.ToLower(sensor) {
-	case "sensor de temperatura":
+	sensor = strings.ToLower(sensor)
+	switch {
+	case strings.Contains(sensor, "temperatura"):
 		return value > 35.0 || value < 5.0
-	case "sensor de humedad":
+	case strings.Contains(sensor, "humedad") && !strings.Contains(sensor, "suelo") && !strings.Contains(sensor, "yl-69"):
 		return value < 30.0 || value > 90.0
-	case "sensor de luminosidad":
+	case strings.Contains(sensor, "luminosidad"):
 		return value < 50.0
-	case "sensor ultrasonico":
-		return value < 5.0
-	case "sensor de lluvia yl-83":
+	case strings.Contains(sensor, "ultrasonico"):
+		return value < 5.0 // Nivel de agua muy bajo
+	case strings.Contains(sensor, "lluvia") || strings.Contains(sensor, "yl-83"):
 		return value == 0 // Está lloviendo
-	case "sensor de vibración sw-420":
+	case strings.Contains(sensor, "vibracion") || strings.Contains(sensor, "sw-420"):
 		return value == 1 // Vibración detectada
+	case strings.Contains(sensor, "yl-69") || (strings.Contains(sensor, "humedad") && strings.Contains(sensor, "suelo")):
+		// Para sensores YL-69: valores altos indican suelo seco (crítico)
+		return value > 3000 // Suelo muy seco - necesita riego urgente
 	}
 	return false
 }
 
 func isWarning(sensor string, value float64) bool {
-	switch strings.ToLower(sensor) {
-	case "sensor de temperatura":
+	sensor = strings.ToLower(sensor)
+	switch {
+	case strings.Contains(sensor, "temperatura"):
 		return (value > 30.0 && value <= 35.0) || (value < 10.0 && value >= 5.0)
-	case "sensor de humedad":
+	case strings.Contains(sensor, "humedad") && !strings.Contains(sensor, "suelo") && !strings.Contains(sensor, "yl-69"):
 		return (value < 40.0 && value >= 30.0) || (value > 80.0 && value <= 90.0)
-	case "sensor de luminosidad":
+	case strings.Contains(sensor, "luminosidad"):
 		return value < 100.0 && value >= 50.0
-	case "sensor ultrasonico":
-		return value < 10.0 && value >= 5.0
+	case strings.Contains(sensor, "ultrasonico"):
+		return value < 10.0 && value >= 5.0 // Nivel de agua bajo
+	case strings.Contains(sensor, "yl-69") || (strings.Contains(sensor, "humedad") && strings.Contains(sensor, "suelo")):
+		// Advertencia si el suelo está empezando a secarse
+		return value > 2000 && value <= 3000
 	}
 	return false
 }
@@ -300,7 +344,7 @@ func consumeSensorData(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub *
 	}
 }
 
-// Consumer para la cola de eventos de bomba
+// Consumer para la cola de eventos de bomba (corregido)
 func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub *websocket.Hub) {
 	msgs, err := ch.Consume(queueName, "", true, false, false, false, nil)
 	if err != nil {
@@ -325,10 +369,21 @@ func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub 
 			continue
 		}
 
+		// Extraer bomba del evento si no viene en el campo bomba
+		bombaDetectada := bombaEvent.Bomba
+		if bombaDetectada == "" {
+			eventoLower := strings.ToLower(bombaEvent.Evento)
+			if strings.Contains(eventoLower, "bomba a") {
+				bombaDetectada = "A"
+			} else if strings.Contains(eventoLower, "bomba b") {
+				bombaDetectada = "B"
+			}
+		}
+
 		log.Printf("   🚰 EVENTO BOMBA: %s", bombaEvent.Evento)
-		log.Printf("      MAC: %s, Bomba: %s", bombaEvent.MacAddress, bombaEvent.Bomba)
+		log.Printf("      MAC: %s, Bomba: %s, Sensor ID: %d", bombaEvent.MacAddress, bombaDetectada, bombaEvent.IDSensor)
 		if bombaEvent.ValorHumedad != 0 {
-			log.Printf("      Humedad: %.0f", bombaEvent.ValorHumedad)
+			log.Printf("      Valor Humedad YL-69: %.0f ADC", bombaEvent.ValorHumedad)
 		}
 		if bombaEvent.TiempoEncendidaSeg != nil {
 			log.Printf("      Tiempo encendida: %d seg", *bombaEvent.TiempoEncendidaSeg)
@@ -339,8 +394,8 @@ func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub 
 			log.Printf("   ❌ Error insertando evento bomba: %v", err)
 		}
 
-		// Crear alerta informativa para eventos de bomba
-		if strings.Contains(bombaEvent.Evento, "activada") {
+		// Crear alerta informativa para eventos de bomba activada
+		if strings.Contains(strings.ToLower(bombaEvent.Evento), "activada") {
 			log.Printf("   💧 BOMBA ACTIVADA - Creando alerta informativa")
 
 			// Obtener usuario y enviar notificación
@@ -353,11 +408,11 @@ func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub 
 				alertMsg := fmt.Sprintf(`💧 <b>BOMBA ACTIVADA</b>
 📍 <b>Dispositivo:</b> %s
 🚰 <b>Bomba:</b> %s
-📊 <b>Humedad detectada:</b> %.0f
+📊 <b>Sensor YL-69:</b> %.0f ADC (suelo seco)
 🕐 <b>Fecha:</b> %s
 
 💡 Tu sistema de riego está funcionando correctamente`,
-					bombaEvent.MacAddress, bombaEvent.Bomba, bombaEvent.ValorHumedad,
+					bombaEvent.MacAddress, bombaDetectada, bombaEvent.ValorHumedad,
 					time.Now().Format("2006-01-02 15:04:05"))
 
 				// Enviar solo notificación por Telegram (menos invasivo)
@@ -373,7 +428,7 @@ func consumeBombaEvents(ch *amqp.Channel, queueName string, dbConn *sql.DB, hub 
 	}
 }
 
-// Función principal del consumer - ahora maneja dos colas
+// Función principal del consumer - maneja dos colas
 func ConsumeFromQueues(hub *websocket.Hub) {
 	amqpURL := os.Getenv("AMQP_URL")
 	sensorQueue := os.Getenv("SENSOR_QUEUE_NAME") // datos_sensores

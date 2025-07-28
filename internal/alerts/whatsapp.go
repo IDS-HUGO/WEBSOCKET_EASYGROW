@@ -80,15 +80,3 @@ func SendWhatsAppAlert(phone, message string) error {
 	fmt.Printf("✅ Mensaje WhatsApp enviado a: %s\n", phone)
 	return nil
 }
-
-// INSTRUCCIONES PARA CONFIGURAR GREEN API:
-//
-// 1. Ve a https://green-api.com/ y crea una cuenta
-// 2. Obtén tu Instance ID y API Token
-// 3. IMPORTANTE: Debes escanear el código QR con WhatsApp Web desde tu teléfono
-// 4. Verifica que tu instancia esté "authorized" en el panel de Green API
-// 5. Prueba enviando un mensaje desde el panel web primero
-//
-// FORMATO DE NÚMERO:
-// - México: +529727228805 se convierte en 529727228805@c.us
-// - Otros países: +1234567890 se convierte en 1234567890@c.us
